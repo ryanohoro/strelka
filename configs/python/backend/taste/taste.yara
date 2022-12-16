@@ -415,8 +415,9 @@ rule lnk_file {
     meta:
         description = "Windows Shortcut file"
         type = "executable"
+        $a = { 4c 00 00 00 01 14 02 00 } // Header length + partial CLSID
     condition:
-        uint32(0) == 0x0000004C
+        $a at 0
 }
 
 rule macho_file {
