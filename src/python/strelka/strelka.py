@@ -23,6 +23,61 @@ import yara  # type: ignore
 from boltons import iterutils  # type: ignore
 from tldextract import TLDExtract  # type: ignore
 
+from opentelemetry import trace
+from opentelemetry.exporter.jaeger.thrift import JaegerExporter
+from opentelemetry.sdk.resources import SERVICE_NAME, Resource
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import (
+    BatchSpanProcessor,
+    ConsoleSpanExporter,
+)
+
+
+from opentelemetry import metrics
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import (
+    ConsoleMetricExporter,
+    PeriodicExportingMetricReader,
+)
+
+from opentelemetry.instrumentation.redis import RedisInstrumentor
+
+resource = Resource(attributes={
+    SERVICE_NAME: "backend"
+})
+
+jaeger_exporter = JaegerExporter(
+    agent_host_name="jaeger",
+    agent_port=6831,
+)
+
+provider = TracerProvider(resource=resource)
+processor = BatchSpanProcessor(jaeger_exporter)  # ConsoleSpanExporter())
+provider.add_span_processor(processor)
+
+# Sets the global default tracer provider
+trace.set_tracer_provider(provider)
+
+# Creates a tracer from the global tracer provider
+tracer = trace.get_tracer(__name__)
+
+# Instrument redis
+# RedisInstrumentor().instrument(tracer_provider=provider)
+
+metric_reader = PeriodicExportingMetricReader(ConsoleMetricExporter())
+provider = MeterProvider(metric_readers=[metric_reader], resource=resource)
+
+# Sets the global default meter provider
+metrics.set_meter_provider(provider)
+
+# Creates a meter from the global meter provider
+meter = metrics.get_meter(__name__)
+
+work_counter = meter.create_counter(
+    "work.counter", unit="1", description="Counts the amount of work done"
+)
+
 
 class RequestTimeout(Exception):
     """Raised when request times out."""
@@ -178,13 +233,12 @@ class Backend(object):
                     break
 
             # Retrieve request task from Redis coordinator
-            task = self.coordinator.zpopmin('tasks', count=1)
-            if len(task) == 0:
-                time.sleep(0.25)
+            task = self.coordinator.bzpopmin('tasks', timeout=60)
+            if not task:
                 continue
 
             # Get request metadata and Redis context deadline UNIX timestamp
-            (task_item, expire_at) = task[0]
+            (_, task_item, expire_at) = task
 
             # Support old (ID only) and new (JSON) style requests
             try:
@@ -232,10 +286,13 @@ class Backend(object):
                 logging.exception('unknown exception (see traceback below)')
 
             count += 1
+            work_counter.add(1, {"work.type": "distribute"})
 
         logging.info(f'shutdown after scanning {count} file(s) and'
                      f' {time.time() - work_start} second(s)')
+        # metrics.send_metric("worker_total_files_counted", "file_count=" + str(count))
 
+    @tracer.start_as_current_span("distribute")
     def distribute(self, root_id: str, file: File, expire_at: int) -> list[dict]:
         """Distributes a file through scanners.
 
@@ -327,6 +384,9 @@ class Backend(object):
 
                         options = scanner.get('options', {})
 
+                        current_span = trace.get_current_span()
+                        current_span.set_attributes(file.dictionary())
+
                         # Run the scanner
                         (scanner_files, scanner_event) = plugin.scan_wrapper(
                             data,
@@ -375,6 +435,8 @@ class Backend(object):
         except RequestTimeout:
             signal.alarm(0)
             raise
+
+        work_counter.add(1, {"work.type": "process"})
 
         return events
 
@@ -530,6 +592,7 @@ class Scanner(object):
         """
         pass
 
+    @tracer.start_as_current_span("scan")
     def scan_wrapper(self,
                      data: bytes,
                      file: File,
@@ -565,6 +628,8 @@ class Scanner(object):
             signal.alarm(self.scanner_timeout)
             self.expire_at = expire_at
             self.scan(data, file, options, expire_at)
+            current_span = trace.get_current_span()
+            current_span.set_attribute("scanner", self.name)
             signal.alarm(0)
         except ScannerTimeout:
             self.flags.append('timed_out')

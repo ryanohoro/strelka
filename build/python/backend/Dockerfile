@@ -2,6 +2,7 @@ FROM ubuntu:22.04
 ARG DEBIAN_FRONTEND=noninteractive
 LABEL maintainer="Target Brands, Inc. TTS-CFC-OpenSource@target.com"
 
+ARG TESTS=true
 ARG CONFIG_TESTS=false
 
 ARG USERNAME=strelka
@@ -64,6 +65,7 @@ RUN apt-get -q update && \
     libssl-dev \
     libzbar0 \
     libgl1 \
+    nano \
     python3-setuptools \
     redis-server \
     tesseract-ocr \
@@ -152,6 +154,8 @@ COPY ./build/python/backend/requirements.txt /strelka/requirements.txt
 RUN pip3 install --no-cache-dir -r /strelka/requirements.txt && \
     pip3 install --index-url https://lief-project.github.io/packages --trusted-host lief.quarkslab.com lief
 
+RUN pip3 freeze
+
 # Copy Strelka files
 COPY ./src/python/ /strelka/
 COPY ./build/python/backend/setup.py /strelka/setup.py
@@ -169,7 +173,6 @@ RUN cd /strelka/ && \
     automake \
     build-essential \
     cmake \
-    curl \
     gcc \
     git \
     gpg \
@@ -178,7 +181,6 @@ RUN cd /strelka/ && \
     python3-dev \
     python3-pip \
     python3-wheel && \
-    apt-get purge -qq python3-setuptools  && \
     apt-get clean -qq && \
     rm -rf /var/lib/apt/lists/* /tmp/yara* && \
 # Assign permissions to Strelka scan result logging directory
@@ -192,7 +194,7 @@ USER $USERNAME
 # Run build checks
 RUN echo '[+] Run build checks' && \
     cd /strelka/strelka/ && \
-    python3 -m pytest -s tests/ && \
+    if $TESTS; then python3 -m pytest -s tests/; fi && \
     if $CONFIG_TESTS; then python3 -m pytest -s tests_configuration/; fi && \
     echo '[+] Done'
 
