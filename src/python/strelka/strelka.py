@@ -233,27 +233,34 @@ class Backend(object):
                     break
 
             # Retrieve request task from Redis coordinator
-            task = self.coordinator.bzpopmin('tasks', timeout=60)
-            if not task:
-                continue
+            if self.backend_cfg.get("coordinator", {"mode": "polling"}).get("mode", "polling") == "polling":
+                task = self.coordinator.zpopmin('tasks', count=1)
+                # Get request metadata and Redis context deadline UNIX timestamp
+                if not task:
+                    time.sleep(self.backend_cfg.get("coordinator", {"wait-timeout-sec": 0.250}).get("wait-timeout-sec", 0.250) * 100)
+                    continue
+                task = task[0]
+                (task_item, expire_at) = task
+            elif self.backend_cfg.get("coordinator", {"mode": "polling"}).get("mode", "polling") == "blocking":
+                task = self.coordinator.bzpopmin('tasks', timeout=self.backend_cfg.get("coordinator", {"wait-timeout-sec": 60}).get("wait-timeout-sec", 60))
+                if not task:
+                    continue
+                # Get request metadata and Redis context deadline UNIX timestamp
+                (_, task_item, expire_at) = task
+            else:
+                raise Exception("No valid coordinator mode")
 
-            # Get request metadata and Redis context deadline UNIX timestamp
-            (_, task_item, expire_at) = task
-
-            # Support old (ID only) and new (JSON) style requests
+            # Parse request JSON
             try:
                 task_info = json.loads(task_item)
-            except json.JSONDecodeError:
-                root_id = task_item.decode()
-                # Create new file object for task, use the request root_id as the pointer
-                file = File(pointer=root_id)
-            else:
                 root_id = task_info["id"]
-                try:
-                    file = File(pointer=root_id, name=task_info["attributes"]["filename"])
-                except KeyError as ex:
-                    logging.debug(f"No filename attached (error: {ex}) to request: {task_item}")
-                    file = File(pointer=root_id)
+                file = File(pointer=root_id, name=task_info["attributes"]["filename"])
+            except json.JSONDecodeError:
+                logging.error("Failed to parse task_info JSON")
+                continue
+            except KeyError as ex:
+                logging.error(f"No filename attached (error: {ex}) to request: {task_item}")
+                continue
 
             expire_at = math.ceil(expire_at)
             timeout = math.ceil(expire_at - time.time())
