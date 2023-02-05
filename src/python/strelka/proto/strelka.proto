@@ -9,6 +9,7 @@ message Request {
   string client = 2;
   string source = 3;
   bool gatekeeper = 4;
+  string tracecontext = 5;
 }
 
 message Attributes {

@@ -9,6 +9,7 @@ import os
 import re
 import signal
 import string
+import sys
 import time
 import traceback
 import uuid
@@ -21,7 +22,30 @@ import redis
 import validators  # type: ignore
 import yara  # type: ignore
 from boltons import iterutils  # type: ignore
+from opentelemetry import trace
+from opentelemetry.exporter.jaeger.thrift import JaegerExporter
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from tldextract import TLDExtract  # type: ignore
+
+from .telemetry import resource
+
+if "PYTEST_CURRENT_TEST" not in os.environ and "pytest" not in sys.modules:
+    jaeger_exporter = JaegerExporter(
+        agent_host_name="strelka_jaeger_1",
+        agent_port=6831,
+    )
+
+    provider = TracerProvider(resource=resource)
+    processor = BatchSpanProcessor(jaeger_exporter)  # ConsoleSpanExporter())
+    provider.add_span_processor(processor)
+
+    # Sets the global default tracer provider
+    trace.set_tracer_provider(provider)
+
+
+# Creates a tracer from the global tracer provider
+tracer = trace.get_tracer(__name__)
 
 
 class RequestTimeout(Exception):
@@ -82,7 +106,7 @@ class File(object):
         """Inits file object."""
         self.data: Optional[bytes] = data
         self.depth: int = depth
-        self.flavors: dict = {}
+        self.flavors: dict[str, list[str]] = {}
         self.name: str = name
         self.parent: str = parent
         self.pointer: str = pointer
@@ -113,7 +137,7 @@ class File(object):
         In cases where flavors and self.flavors share duplicate keys, flavors
         will overwrite the duplicate value.
         """
-        self.flavors = {**self.flavors, **flavors}
+        self.flavors.update(flavors)
 
 
 def timeout_handler(ex):
@@ -232,6 +256,8 @@ class Backend(object):
             try:
                 task_info = json.loads(task_item)
                 root_id = task_info["id"]
+                traceparent = task_info.get("tracecontext", "")
+                print("work", traceparent)
                 file = File(pointer=root_id, name=task_info["attributes"]["filename"])
             except json.JSONDecodeError:
                 logging.error("Failed to parse task_info JSON")
@@ -255,7 +281,7 @@ class Backend(object):
                 signal.alarm(timeout)
 
                 # Distribute the file to the scanners
-                self.distribute(root_id, file, expire_at)
+                self.distribute(root_id, file, expire_at, traceparent=traceparent)
 
                 # Push completed event back to Redis to complete request
                 p = self.coordinator.pipeline(transaction=False)
@@ -279,7 +305,9 @@ class Backend(object):
             f" {time.time() - work_start} second(s)"
         )
 
-    def distribute(self, root_id: str, file: File, expire_at: int) -> list[dict]:
+    def distribute(
+        self, root_id: str, file: File, expire_at: int, traceparent: Optional[str] = ""
+    ) -> list[dict]:
         """Distributes a file through scanners.
 
         Args:
@@ -290,99 +318,134 @@ class Backend(object):
             List of event dictionaries
         """
 
-        try:
-            data = b""
-            files = []
-            events = []
+        from opentelemetry.trace.propagation.tracecontext import (
+            TraceContextTextMapPropagator,
+        )
 
-            pipeline = None
+        ctx = None
+
+        if traceparent:
+            carrier = {"traceparent": traceparent}
+            ctx = TraceContextTextMapPropagator().extract(carrier)
+
+        with tracer.start_as_current_span(
+            "distribute",
+            context=ctx,
+        ):
+
+            current_span = trace.get_current_span()
+            current_span.set_attribute("file", json.dumps(file.dictionary()))
 
             try:
-                # Prepare timeout handler
-                signal.signal(signal.SIGALRM, timeout_handler(DistributionTimeout))
-                signal.alarm(self.limits.get("distribution", 600))
+                data = b""
+                files = []
+                events = []
 
-                if file.depth > self.limits.get("max_depth", 15):
-                    logging.info(f"request {root_id} exceeded maximum depth")
-                    return []
+                pipeline = None
 
-                # Distribute can work local-only (data in File) or through a coordinator
-                if file.data:
-                    # Pull data for file from File object
-                    data = file.data
-                elif self.coordinator:
-                    # Pull data for file from coordinator
-                    while True:
-                        pop = self.coordinator.lpop(f"data:{file.pointer}")
-                        if pop is None:
-                            break
-                        data += pop
+                try:
+                    # Prepare timeout handler
+                    signal.signal(signal.SIGALRM, timeout_handler(DistributionTimeout))
+                    signal.alarm(self.limits.get("distribution", 600))
 
-                    # Initialize Redis pipeline
-                    pipeline = self.coordinator.pipeline(transaction=False)
-                else:
-                    raise Exception("No data or coordinator available")
+                    if file.depth > self.limits.get("max_depth", 15):
+                        logging.info(f"request {root_id} exceeded maximum depth")
+                        return []
 
-                # Match data to mime and yara flavors
-                file.add_flavors(self.match_flavors(data))
+                    # Distribute can work local-only (data in File) or through a coordinator
+                    if file.data:
+                        # Pull data for file from File object
+                        data = file.data
+                    elif self.coordinator:
+                        # Pull data for file from coordinator
+                        with tracer.start_as_current_span("lpop"):
+                            logging.debug("lpop")
+                            while True:
+                                pop = self.coordinator.lpop(f"data:{file.pointer}")
+                                if pop is None:
+                                    break
+                                data += pop
 
-                # Get list of matching scanners
-                scanner_list = self.match_scanners(file)
+                        # Initialize Redis pipeline
+                        pipeline = self.coordinator.pipeline(transaction=False)
+                    else:
+                        raise Exception("No data or coordinator available")
 
-                tree_dict = {
-                    "node": file.uid,
-                    "parent": file.parent,
-                    "root": root_id,
-                }
+                    # Match data to mime and yara flavors
+                    file.add_flavors(self.match_flavors(data))
 
-                # Since root_id comes from the request, use that instead of the file's uid
-                if file.depth == 0:
-                    tree_dict["node"] = root_id
-                if file.depth == 1:
-                    tree_dict["parent"] = root_id
+                    # Get list of matching scanners
+                    scanner_list = self.match_scanners(file)
 
-                # Update the file object
-                file.scanners = [s.get("name") for s in scanner_list]
-                file.size = len(data)
-                file.tree = tree_dict
+                    tree_dict = {
+                        "node": file.uid,
+                        "parent": file.parent,
+                        "root": root_id,
+                    }
 
-                scan: dict = {}
+                    # Since root_id comes from the request, use that instead of the file's uid
+                    if file.depth == 0:
+                        tree_dict["node"] = root_id
+                    if file.depth == 1:
+                        tree_dict["parent"] = root_id
 
-                for scanner in scanner_list:
-                    try:
-                        name = scanner["name"]
-                        und_name = inflection.underscore(name)
-                        scanner_import = f"strelka.scanners.{und_name}"
-                        module = importlib.import_module(scanner_import)
+                    # Update the file object
+                    file.scanners = [s.get("name") for s in scanner_list]
+                    file.size = len(data)
+                    file.tree = tree_dict
 
-                        if self.backend_cfg.get("caching", {"scanner": True}).get(
-                            "scanner", True
-                        ):
-                            # Cache a copy of each scanner object
-                            if und_name not in self.scanner_cache:
-                                attr = getattr(module, name)(
+                    current_span = trace.get_current_span()
+                    current_span.set_attribute("file", json.dumps(file.dictionary()))
+
+                    scan: dict = {}
+
+                    scan_results = []
+
+                    for scanner in scanner_list:
+                        try:
+                            name = scanner["name"]
+                            und_name = inflection.underscore(name)
+                            scanner_import = f"strelka.scanners.{und_name}"
+                            module = importlib.import_module(scanner_import)
+
+                            if self.backend_cfg.get("caching", {"scanner": True}).get(
+                                "scanner", True
+                            ):
+                                # Cache a copy of each scanner object
+                                if und_name not in self.scanner_cache:
+                                    attr = getattr(module, name)(
+                                        self.backend_cfg, self.coordinator
+                                    )
+                                    self.scanner_cache[und_name] = attr
+                                plugin = self.scanner_cache[und_name]
+
+                                # Clear cached scanner of files
+                                plugin.files = []
+                                plugin.flags = []
+                            else:
+                                plugin = getattr(module, name)(
                                     self.backend_cfg, self.coordinator
                                 )
-                                self.scanner_cache[und_name] = attr
-                            plugin = self.scanner_cache[und_name]
 
-                            # Clear cached scanner of files
-                            plugin.files = []
-                            plugin.flags = []
-                        else:
-                            plugin = getattr(module, name)(
-                                self.backend_cfg, self.coordinator
+                            options = scanner.get("options", {})
+
+                            # Run the scanner
+                            scan_results.append(
+                                plugin.scan_wrapper(
+                                    data,
+                                    file,
+                                    options,
+                                    expire_at,
+                                )
                             )
 
-                        options = scanner.get("options", {})
+                        except ModuleNotFoundError:
+                            logging.exception(
+                                f'scanner {scanner.get("name", "__missing__")} not found'
+                            )
 
-                        # Run the scanner
-                        (scanner_files, scanner_event) = plugin.scan_wrapper(
-                            data,
-                            file,
-                            options,
-                            expire_at,
-                        )
+                    for scan_result in scan_results:
+                        (scanner_files, scanner_event) = scan_result
 
                         # Collect extracted files
                         files.extend(scanner_files)
@@ -392,40 +455,40 @@ class Backend(object):
                             **scanner_event,
                         }
 
-                    except ModuleNotFoundError:
-                        logging.exception(
-                            f'scanner {scanner.get("name", "__missing__")} not found'
-                        )
+                    event = {
+                        **{"file": file.dictionary()},
+                        **{"scan": scan},
+                    }
 
-                event = {
-                    **{"file": file.dictionary()},
-                    **{"scan": scan},
-                }
+                    # Collect events for local-only
+                    events.append(event)
 
-                # Collect events for local-only
-                events.append(event)
+                    # Send event back to Redis coordinator
+                    if pipeline:
+                        pipeline.rpush(f"event:{root_id}", format_event(event))
+                        pipeline.expireat(f"event:{root_id}", expire_at)
+                        pipeline.execute()
 
-                # Send event back to Redis coordinator
-                if pipeline:
-                    pipeline.rpush(f"event:{root_id}", format_event(event))
-                    pipeline.expireat(f"event:{root_id}", expire_at)
-                    pipeline.execute()
+                    signal.alarm(0)
 
+                except DistributionTimeout:
+                    # FIXME: node id is not always file.uid
+                    logging.exception(f"node {file.uid} timed out")
+
+                # Re-ingest extracted files
+                for scanner_file in files:
+                    scanner_file.parent = file.uid
+                    scanner_file.depth = file.depth + 1
+                    events.extend(self.distribute(root_id, scanner_file, expire_at))
+                    # distribute_tasks.append(self.distribute(root_id, scanner_file, expire_at))
+
+                # distribute_events = await asyncio.gather(*distribute_tasks)
+                # for distribute_event in distribute_events:
+                #     events.extend(distribute_event)
+
+            except RequestTimeout:
                 signal.alarm(0)
-
-            except DistributionTimeout:
-                # FIXME: node id is not always file.uid
-                logging.exception(f"node {file.uid} timed out")
-
-            # Re-ingest extracted files
-            for scanner_file in files:
-                scanner_file.parent = file.uid
-                scanner_file.depth = file.depth + 1
-                events.extend(self.distribute(root_id, scanner_file, expire_at))
-
-        except RequestTimeout:
-            signal.alarm(0)
-            raise
+                raise
 
         return events
 
@@ -614,64 +677,72 @@ class Scanner(object):
             RequestTimeout: interrupts the scan when request times out.
             Exception: Unknown exception occurred.
         """
-        start = time.time()
-        self.event = dict()
-        self.scanner_timeout = options.get(
-            "scanner_timeout", self.scanner_timeout or 10
-        )
-
-        try:
-            signal.signal(signal.SIGALRM, self.timeout_handler)
-            signal.alarm(self.scanner_timeout)
-            self.expire_at = expire_at
-            self.scan(data, file, options, expire_at)
-            signal.alarm(0)
-        except ScannerTimeout:
-            self.flags.append("timed_out")
-        except (DistributionTimeout, RequestTimeout):
-            raise
-        except ScannerException as e:
-            signal.alarm(0)
-            self.event.update({"exception": e.message})
-        except Exception as e:
-            signal.alarm(0)
-            logging.exception(
-                f"{self.name}: unhandled exception while scanning"
-                f' uid {file.uid if file else "_missing_"} (see traceback below)'
-            )
-            self.flags.append("uncaught_exception")
-            self.event.update(
-                {"exception": "\n".join(traceback.format_exception(e, limit=-10))}
+        with tracer.start_as_current_span("scan"):
+            start = time.time()
+            self.event = dict()
+            self.scanner_timeout = options.get(
+                "scanner_timeout", self.scanner_timeout or 10
             )
 
-        self.event = {
-            **{"elapsed": round(time.time() - start, 6)},
-            **{"flags": self.flags},
-            **self.event,
-        }
-        return (self.files, {self.key: self.event})
+            current_span = trace.get_current_span()
+
+            current_span.set_attribute("scanner.name", self.name)
+
+            try:
+                signal.signal(signal.SIGALRM, self.timeout_handler)
+                signal.alarm(self.scanner_timeout)
+                self.expire_at = expire_at
+                self.scan(data, file, options, expire_at)
+                signal.alarm(0)
+            except ScannerTimeout:
+                self.flags.append("timed_out")
+            except (DistributionTimeout, RequestTimeout):
+                raise
+            except ScannerException as e:
+                signal.alarm(0)
+                self.event.update({"exception": e.message})
+            except Exception as e:
+                signal.alarm(0)
+                logging.exception(
+                    f"{self.name}: unhandled exception while scanning"
+                    f' uid {file.uid if file else "_missing_"} (see traceback below)'
+                )
+                self.flags.append("uncaught_exception")
+                self.event.update(
+                    {"exception": "\n".join(traceback.format_exception(e, limit=-10))}
+                )
+
+            self.event = {
+                **{"elapsed": round(time.time() - start, 6)},
+                **{"flags": self.flags},
+                **self.event,
+            }
+            return (self.files, {self.key: self.event})
 
     def emit_file(
         self, data: bytes, name: str = "", flavors: Optional[list[str]] = None
     ) -> None:
         """Re-ingest extracted file"""
-        extract_file = File(
-            name=name,
-            source=self.name,
-        )
-        if flavors:
-            extract_file.add_flavors({"external": flavors})
+        with tracer.start_as_current_span("emit_file"):
+            extract_file = File(
+                name=name,
+                source=self.name,
+            )
+            if flavors:
+                extract_file.add_flavors({"external": flavors})
 
-        if self.coordinator:
-            for c in chunk_string(data):
-                self.upload_to_coordinator(
-                    extract_file.pointer,
-                    c,
-                    self.expire_at,
-                )
-        else:
-            extract_file.data = data
-        self.files.append(extract_file)
+            # trace.get_current_span().set_attribute("file", json.dumps(extract_file.dictionary()))
+
+            if self.coordinator:
+                for c in chunk_string(data):
+                    self.upload_to_coordinator(
+                        extract_file.pointer,
+                        c,
+                        self.expire_at,
+                    )
+            else:
+                extract_file.data = data
+            self.files.append(extract_file)
 
     def upload_to_coordinator(self, pointer, chunk, expire_at) -> None:
         """Uploads data to coordinator.
