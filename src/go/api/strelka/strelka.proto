@@ -1,5 +1,9 @@
 syntax = "proto3";
 
+package strelka;
+
+option go_package = "github.com/target/strelka/src/go/api/strelka;strelka";
+
 service Frontend {
   rpc ScanFile(stream ScanFileRequest) returns (stream ScanResponse) {}
 }
@@ -9,6 +13,7 @@ message Request {
   string client = 2;
   string source = 3;
   bool gatekeeper = 4;
+  string tracecontext = 5;
 }
 
 message Attributes {
