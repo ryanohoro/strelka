@@ -94,10 +94,11 @@ class ScanHtml(strelka.Scanner):
             self.event["total"]["scripts"] = len(scripts)
             self.event.setdefault("scripts", [])
             for (index, script) in enumerate(scripts):
-                script_flavors = [
-                    script.get("language", "").lower(),
-                    script.get("type", "").lower(),
-                ]
+                script_flavors = []
+                if script.get("language"):
+                    script_flavors.append(script.get("language").lower())
+                if script.get("type"):
+                    script_flavors.append(script.get("type").lower())
                 script_entry = {
                     "src": script.get("src"),
                     "language": script.get("language"),

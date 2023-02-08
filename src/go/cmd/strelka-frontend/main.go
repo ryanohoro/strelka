@@ -265,7 +265,8 @@ func (s *server) ScanFile(stream strelka.Frontend_ScanFileServer) error {
 
 		// Wait for event data to appear in the coordinator Redis
 		span.AddEvent("Waiting for event...")
-		lpop, err := s.coordinator.cli.LPop(stream.Context(), keye).Result()
+
+		lpop, err := s.coordinator.cli.BLPop(stream.Context(), keye, timeout=60).Result()
 		if err != nil {
 			time.Sleep(250 * time.Millisecond)
 			continue

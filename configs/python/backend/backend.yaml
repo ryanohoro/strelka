@@ -1,3 +1,4 @@
+version: "2023-01-20-05"
 logging_cfg: '/etc/strelka/logging.yaml'
 limits:
   max_files: 5000
@@ -8,11 +9,25 @@ limits:
 coordinator:
   addr: 'strelka_coordinator_1:6379'
   db: 0
+  mode: blocking
 tasting:
   mime_db: null
   yara_rules: '/etc/strelka/taste/'
 caching:
   scanner: true
+async:
+  scanner: false
+telemetry:
+#  metrics:
+#    enabled: true
+#    addr: ''
+  traces:
+    enabled: true
+    exporter: otlp
+    proto: http
+    addr: 'http://detlx2001.hq.target.com:4317/'
+    insecure: true
+    sampling: 1.0
 scanners:
   #'ScanAntiword':
   #  - positive:

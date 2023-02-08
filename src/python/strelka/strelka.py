@@ -9,7 +9,6 @@ import os
 import re
 import signal
 import string
-import sys
 import time
 import traceback
 import uuid
@@ -23,29 +22,10 @@ import validators  # type: ignore
 import yara  # type: ignore
 from boltons import iterutils  # type: ignore
 from opentelemetry import trace
-from opentelemetry.exporter.jaeger.thrift import JaegerExporter
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from tldextract import TLDExtract  # type: ignore
 
-from .telemetry import resource
-
-if "PYTEST_CURRENT_TEST" not in os.environ and "pytest" not in sys.modules:
-    jaeger_exporter = JaegerExporter(
-        agent_host_name="strelka_jaeger_1",
-        agent_port=6831,
-    )
-
-    provider = TracerProvider(resource=resource)
-    processor = BatchSpanProcessor(jaeger_exporter)  # ConsoleSpanExporter())
-    provider.add_span_processor(processor)
-
-    # Sets the global default tracer provider
-    trace.set_tracer_provider(provider)
-
-
-# Creates a tracer from the global tracer provider
-tracer = trace.get_tracer(__name__)
+from . import __namespace__
+from .telemetry.traces import get_tracer
 
 
 class RequestTimeout(Exception):
@@ -120,7 +100,6 @@ class File(object):
             self.pointer = self.uid
 
     def dictionary(self) -> dict:
-
         return {
             "depth": self.depth,
             "flavors": self.flavors,
@@ -150,14 +129,20 @@ def timeout_handler(ex):
 
 
 class Backend(object):
-    def __init__(
-        self, backend_cfg: dict, coordinator: Optional[redis.StrictRedis] = None
-    ) -> None:
+    def __init__(self, backend_cfg: dict, coordinator: bool = True) -> None:
         self.scanner_cache: dict = {}
         self.backend_cfg: dict = backend_cfg
-        self.coordinator: Optional[redis.StrictRedis] = coordinator
+        self.coordinator: Optional[redis.StrictRedis] = None
         self.limits: dict = backend_cfg.get("limits", {})
         self.scanners: dict = backend_cfg.get("scanners", {})
+
+        self.tracer = get_tracer(
+            backend_cfg.get("telemetry", {}).get("traces", {}),
+            meta={
+                "strelka.config.version": self.backend_cfg.get("version", ""),
+                "strelka.config.sha1": self.backend_cfg.get("sha1", ""),
+            },
+        )
 
         self.compiled_magic = magic.Magic(
             magic_file=backend_cfg.get("tasting", {}).get("mime_db", ""),
@@ -173,11 +158,28 @@ class Backend(object):
                 f"{yara_rules}/**/*.yar*",
                 recursive=True,
             )
-            for (i, entry) in enumerate(globbed_yara):
+            for i, entry in enumerate(globbed_yara):
                 yara_filepaths[f"namespace{i}"] = entry
             self.compiled_yara = yara.compile(filepaths=yara_filepaths)
         else:
             self.compiled_yara = yara.compile(filepath=yara_rules)
+
+        if coordinator:
+            try:
+                coordinator_cfg = backend_cfg.get("coordinator")
+                coordinator_addr = coordinator_cfg.get("addr").split(":")
+                self.coordinator = redis.StrictRedis(
+                    host=coordinator_addr[0],
+                    port=coordinator_addr[1],
+                    db=coordinator_cfg.get("db"),
+                )
+                if self.coordinator.ping():
+                    logging.debug("coordinator up")
+                else:
+                    raise Exception("coordinator ping failed")
+            except Exception:
+                logging.exception("coordinator unavailable")
+                raise
 
     def taste_mime(self, data: bytes) -> list:
         """Tastes file data with libmagic."""
@@ -224,12 +226,7 @@ class Backend(object):
                 task = self.coordinator.zpopmin("tasks", count=1)
                 # Get request metadata and Redis context deadline UNIX timestamp
                 if not task:
-                    time.sleep(
-                        self.backend_cfg.get(
-                            "coordinator", {"wait-timeout-sec": 0.250}
-                        ).get("wait-timeout-sec", 0.250)
-                        * 100
-                    )
+                    time.sleep(0.250)
                     continue
                 task = task[0]
                 (task_item, expire_at) = task
@@ -239,12 +236,7 @@ class Backend(object):
                 )
                 == "blocking"
             ):
-                task = self.coordinator.bzpopmin(
-                    "tasks",
-                    timeout=self.backend_cfg.get(
-                        "coordinator", {"wait-timeout-sec": 60}
-                    ).get("wait-timeout-sec", 60),
-                )
+                task = self.coordinator.bzpopmin("tasks", timeout=60)
                 if not task:
                     continue
                 # Get request metadata and Redis context deadline UNIX timestamp
@@ -257,7 +249,6 @@ class Backend(object):
                 task_info = json.loads(task_item)
                 root_id = task_info["id"]
                 traceparent = task_info.get("tracecontext", "")
-                print("work", traceparent)
                 file = File(pointer=root_id, name=task_info["attributes"]["filename"])
             except json.JSONDecodeError:
                 logging.error("Failed to parse task_info JSON")
@@ -301,7 +292,7 @@ class Backend(object):
             count += 1
 
         logging.info(
-            f"shutdown after scanning {count} file(s) and"
+            f"shutdown after servicing {count} requests(s) and"
             f" {time.time() - work_start} second(s)"
         )
 
@@ -314,6 +305,7 @@ class Backend(object):
             root_id: Root request/file UUIDv4
             file: File object
             expire_at: Deadline UNIX timestamp
+            traceparent: OpenTelemetry tracing context
         Returns:
             List of event dictionaries
         """
@@ -328,14 +320,10 @@ class Backend(object):
             carrier = {"traceparent": traceparent}
             ctx = TraceContextTextMapPropagator().extract(carrier)
 
-        with tracer.start_as_current_span(
+        with self.tracer.start_as_current_span(
             "distribute",
             context=ctx,
-        ):
-
-            current_span = trace.get_current_span()
-            current_span.set_attribute("file", json.dumps(file.dictionary()))
-
+        ) as current_span:
             try:
                 data = b""
                 files = []
@@ -358,8 +346,10 @@ class Backend(object):
                         data = file.data
                     elif self.coordinator:
                         # Pull data for file from coordinator
-                        with tracer.start_as_current_span("lpop"):
-                            logging.debug("lpop")
+                        with self.tracer.start_as_current_span("lpop") as current_span:
+                            # logging.debug(
+                            #    f"Fetch file data for {file.pointer} from Redis"
+                            # )
                             while True:
                                 pop = self.coordinator.lpop(f"data:{file.pointer}")
                                 if pop is None:
@@ -394,8 +384,42 @@ class Backend(object):
                     file.size = len(data)
                     file.tree = tree_dict
 
-                    current_span = trace.get_current_span()
-                    current_span.set_attribute("file", json.dumps(file.dictionary()))
+                    # Set span attributes for the File object
+                    current_span.set_attribute(
+                        f"{__namespace__}.file.depth", file.depth
+                    )
+                    current_span.set_attribute(
+                        f"{__namespace__}.file.flavors.mime",
+                        file.flavors.get("mime", ""),
+                    )
+                    current_span.set_attribute(
+                        f"{__namespace__}.file.flavors.yara",
+                        file.flavors.get("yara", ""),
+                    )
+                    current_span.set_attribute(
+                        f"{__namespace__}.file.flavors.external",
+                        file.flavors.get("external", ""),
+                    )
+                    current_span.set_attribute(f"{__namespace__}.file.name", file.name)
+                    current_span.set_attribute(
+                        f"{__namespace__}.file.pointer", file.pointer
+                    )
+                    current_span.set_attribute(
+                        f"{__namespace__}.file.scanners", file.scanners
+                    )
+                    current_span.set_attribute(f"{__namespace__}.file.size", file.size)
+                    current_span.set_attribute(
+                        f"{__namespace__}.file.source", file.source
+                    )
+                    current_span.set_attribute(
+                        f"{__namespace__}.file.tree.node", file.tree.get("node", "")
+                    )
+                    current_span.set_attribute(
+                        f"{__namespace__}.file.tree.parent", file.tree.get("parent", "")
+                    )
+                    current_span.set_attribute(
+                        f"{__namespace__}.file.tree.root", file.tree.get("root", "")
+                    )
 
                     scan: dict = {}
 
@@ -480,11 +504,6 @@ class Backend(object):
                     scanner_file.parent = file.uid
                     scanner_file.depth = file.depth + 1
                     events.extend(self.distribute(root_id, scanner_file, expire_at))
-                    # distribute_tasks.append(self.distribute(root_id, scanner_file, expire_at))
-
-                # distribute_events = await asyncio.gather(*distribute_tasks)
-                # for distribute_event in distribute_events:
-                #     events.extend(distribute_event)
 
             except RequestTimeout:
                 signal.alarm(0)
@@ -617,7 +636,10 @@ class Scanner(object):
     """
 
     def __init__(
-        self, backend_cfg: dict, coordinator: Optional[redis.StrictRedis] = None
+        self,
+        backend_cfg: dict,
+        coordinator: Optional[redis.StrictRedis] = None,
+        tracer: Optional[trace.Tracer] = None,
     ) -> None:
         """Inits scanner with scanner name and metadata key."""
         self.name = self.__class__.__name__
@@ -628,9 +650,14 @@ class Scanner(object):
         self.files: list = []
         self.flags: list = []
         self.iocs: list = []
+        self.tracer = tracer
         self.type = IocOptions
         self.extract = TLDExtract(suffix_list_urls=[])
         self.expire_at: int = 0
+
+        if not self.tracer:
+            self.tracer = trace.get_tracer(__name__)
+
         self.init()
 
     def init(self) -> None:
@@ -677,16 +704,17 @@ class Scanner(object):
             RequestTimeout: interrupts the scan when request times out.
             Exception: Unknown exception occurred.
         """
-        with tracer.start_as_current_span("scan"):
+        with self.tracer.start_as_current_span("scan") as current_span:
             start = time.time()
             self.event = dict()
             self.scanner_timeout = options.get(
                 "scanner_timeout", self.scanner_timeout or 10
             )
 
-            current_span = trace.get_current_span()
-
-            current_span.set_attribute("scanner.name", self.name)
+            current_span.set_attribute(f"{__namespace__}.scanner.name", self.name)
+            current_span.set_attribute(
+                f"{__namespace__}.scanner.timeout", self.scanner_timeout
+            )
 
             try:
                 signal.signal(signal.SIGALRM, self.timeout_handler)
@@ -723,7 +751,7 @@ class Scanner(object):
         self, data: bytes, name: str = "", flavors: Optional[list[str]] = None
     ) -> None:
         """Re-ingest extracted file"""
-        with tracer.start_as_current_span("emit_file"):
+        with self.tracer.start_as_current_span("emit_file") as current_span:
             extract_file = File(
                 name=name,
                 source=self.name,
@@ -731,7 +759,9 @@ class Scanner(object):
             if flavors:
                 extract_file.add_flavors({"external": flavors})
 
-            # trace.get_current_span().set_attribute("file", json.dumps(extract_file.dictionary()))
+            current_span.set_attribute(f"{__namespace__}.file.name", name)
+            current_span.set_attribute(f"{__namespace__}.file.size", len(data))
+            current_span.set_attribute(f"{__namespace__}.file.source", self.name)
 
             if self.coordinator:
                 for c in chunk_string(data):

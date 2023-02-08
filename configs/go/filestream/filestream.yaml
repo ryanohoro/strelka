@@ -10,11 +10,11 @@ throughput:
   delay: 0s
 files:
   patterns:
-    - '/glob/to/your/files/*'
-  processed: '/path/to/your/processed/directory/'
-  delete: false
+    - '/tmp/perf/*'
+#  processed: '/tmp/processed/'
+  delete: true
   gatekeeper: true
 response:
   report: 5s
 delta: 5s
-staging: '/path/to/your/staging/directory/'
+staging: '/tmp/staging/'
