@@ -10,7 +10,8 @@ throughput:
   delay: 0s
 files:
   patterns:
-    - '/glob/to/your/files/*'
+    positive:
+      - '/glob/to/your/files/*'
   processed: '/path/to/your/processed/directory/'
   delete: false
   gatekeeper: true

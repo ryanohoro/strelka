@@ -181,7 +181,7 @@ func main() {
 	// Collect files from configuration-specified directories
 	for {
 		t := time.Now()
-		for _, p := range conf.Files.Patterns {
+		for _, p := range conf.Files.Patterns.Positive {
 
 			// Find matching files
 			match, err := filepath.Glob(p)
