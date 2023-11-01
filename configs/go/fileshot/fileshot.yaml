@@ -9,17 +9,32 @@ throughput:
   concurrency: 8
   chunk: 98304
   delay: 1s
+log:
+  path: 'C:\temp\fileshot.log'
+  maxsize: 1      # Log file size limit in Megabytes
+	maxbackups: 0   # Log file backup count limit
+	maxage: 7       # Log file age limit in days
 files:
+  sort:
+    time: desc
+    # path: asc
+    # size: asc
   patterns:
     - '/glob/to/your/files/*'
-  minsize: 0                  # Optional, remove key if not needed
-  maxsize: 9999999999         # Optional, remove key if not needed
-  limitpattern: 999           # Optional, remove key if not needed
-  limittotal: 99999           # Optional, remove key if not needed
-  modified: 99999             # Optional, remove key if not needed
-  mimetypes:                  # Optional, remove key if not needed
-    - 'application/mimetype'
-  delete: false
-  gatekeeper: true
+  minsize: 0                  # Limit minimum file size in bytes
+  maxsize: 999999999          # Limit max file size in bytes
+  limitbandwidth: 999999999   # Limit max file bandwidth in bytes
+  limitpattern: 999           # Limit each file path to a max number of files
+  limittotal: 99999           # Limit all collection to a max number of total files
+  modified: 99999             # Last modified in hours, e.g. 168 Hours = Last Modified < 7 Days Ago
+  mimetypes:                  # Exclude all files with specific mimetypes e.g. application/octet-stream
+    negative:
+      - 'application/mimetype'
+    # positive:
+    #   - 'application/mimetype'
+  excludehashes: # Enabling hash exclusions will cause matching files to be hashed and cause a performance penalty
+    # path: fileshot-exclusions.md5      # Path to a file containing a list of hashes
+    # list:
+    #  - db89bb5ceab87f9c0fcc2ab36c189c2c # List of hashes
 response:
   log: 'strelka.log'

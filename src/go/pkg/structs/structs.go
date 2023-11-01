@@ -26,17 +26,49 @@ type ConfThroughput struct {
 	Delay       time.Duration // optional
 }
 
+type ConfLog struct {
+	Verbose    bool   // optional
+	Path       string // optional
+	MaxSize    int    // optional
+	MaxBackups int    // optional
+	MaxAge     int    // optional
+}
+
+type ConfFilesExcludeHashes struct {
+	Path       string   // optional
+	List       []string // optional
+}
+
+type ConfFilesPatterns struct {
+	Positive       []string // required
+	Negative       []string // optional
+}
+
+type ConfFilesMimetypes struct {
+	Positive       []string // required
+	Negative       []string // optional
+}
+
+type ConfFilesSort struct {
+	Time string // optional
+	Path string // optional
+	Size string // optional
+}
+
 type ConfFiles struct {
-	Patterns     []string // required
-	Mimetypes    []string //optional
-	Minsize      int      //optional
-	Maxsize      int      //optional
-	LimitPattern int      //optional
-	LimitTotal   int      //optional
-	Modified     int      //optional
-	Delete       bool     // optional
-	Gatekeeper   bool     // required
-	Processed    string   // optional
+	Patterns       ConfFilesPatterns  // required
+	Mimetypes      ConfFilesMimetypes // optional
+	Minsize        int64    // optional
+	Maxsize        int64    // optional
+	LimitPattern   int      // optional
+	LimitTotal     int      // optional
+	LimitBandwidth int64    // optional
+	Modified       int      // optional
+	Delete         bool     // optional
+	Gatekeeper     bool     // required
+	Processed      string   // optional
+	ExcludeHashes  ConfFilesExcludeHashes // optional
+	Sort           ConfFilesSort          // optional
 }
 
 type ConfCoordinator struct {
@@ -67,6 +99,7 @@ type FileShot struct {
 	Client     string         // optional
 	Conn       ConfConn       // required
 	Throughput ConfThroughput // required
+	Log        ConfLog        // optional
 	Files      ConfFiles      // required
 	Response   ConfResponse   // optional
 }
