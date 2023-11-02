@@ -140,7 +140,7 @@ func main() {
 
 	if *dryRun {
 
-		getFilePaths(conf, verbose, hashes, "modificationdescending")
+		getFilePaths(conf, verbose, hashes)
 
 	} else {
 
@@ -213,7 +213,7 @@ func main() {
 			Gatekeeper: conf.Files.Gatekeeper,
 		}
 
-		for _, path := range getFilePaths(conf, verbose, hashes, "modificationdescending") {
+		for _, path := range getFilePaths(conf, verbose, hashes) {
 			// Create the ScanFileRequest struct with the provided attributes.
 			req := structs.ScanFileRequest{
 				Request: request,
@@ -335,7 +335,7 @@ func checkFileMimetype(file *os.File, positivemimetypes []string, negativemimety
 	return false, mimeTypeNormal
 }
 
-// checkFileHash checks the MD5 hash of a file against a list of hashes and returns
+// checkFileHash checks the hash of a file against a list of hashes and returns
 // true if a match is found, or false otherwise.
 func checkFileHash(file *os.File, hashlist []string, verbose bool) (bool, string) {
 	// Create a new MD5 hash
@@ -427,7 +427,7 @@ func sortMatches(matches []matchRich, field string, order string) []matchRich {
 
 }
 
-func getFilePaths(conf structs.FileShot, verbose *bool, hashes []string, sortMethod string) []string {
+func getFilePaths(conf structs.FileShot, verbose *bool, hashes []string) []string {
 
 	paths := make([]string, 0)
 	var matchRichFiles []matchRich
@@ -510,12 +510,16 @@ func getFilePaths(conf structs.FileShot, verbose *bool, hashes []string, sortMet
 		matchRichFiles = sortMatches(matchRichFiles, "time", "desc")
 	}
 
-	// TODO: Update these docs
 	// Iterate over the list of files that match the provided pattern.
 	// Order of operation for gate processing:
-	//		1) If Min/Max file size specified, check file size gate and proceed if True.
-	//		2) If Mimetype list specified, check identified mimetype and proceed if True.
-	//	 	3) If MD5 hashing enabled, MD5 hash the file amd compare with exclusions list, proceed if False.
+	//      1) If the total number of files collected crosses the specified limit, end collection
+	//      2) If the total number of files collected for a specific pattern crosses a specified limit, skip
+	//      3) If the modification date for a file is older than specified, skip
+	//		4) If the file is outside the specified min/max file size, skip
+	//      5) If the file would exceed the specified capacity limit, skip
+	//		6) If the file mimetype is not included or excluded by type specification, skip
+	//	 	7) If the file hash matches the specified exclusion list, skip
+	//      8) File staged for sending
 	for _, f := range matchRichFiles {
 
 		var fileSize int64 = 0
