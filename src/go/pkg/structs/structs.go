@@ -62,7 +62,7 @@ type ConfFiles struct {
 	Maxsize        int64    // optional
 	LimitPattern   int      // optional
 	LimitTotal     int      // optional
-	LimitBandwidth int64    // optional
+	LimitCapacity  int64    // optional
 	Modified       int      // optional
 	Delete         bool     // optional
 	Gatekeeper     bool     // required

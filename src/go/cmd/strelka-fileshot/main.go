@@ -431,11 +431,13 @@ func getFilePaths(conf structs.FileShot, verbose *bool, hashes []string, sortMet
 
 	paths := make([]string, 0)
 	var matchRichFiles []matchRich
+	patternLimitReached := false
+	capacityLimitReached := false
 
 	// Set Total Limiter for Max Files to be consumed by host
 	totalCount := 0
-	// Set Total Limiter for Max Bandwidth to be consumed per run
-	var bandwidthCount int64
+	// Set Total Limiter for Max Capacity to be consumed per run
+	var capacityCount int64
 
 	// var patternCount map[string]int
 	patternCount := make(map[string]int)
@@ -448,7 +450,7 @@ func getFilePaths(conf structs.FileShot, verbose *bool, hashes []string, sortMet
 	for _, p := range conf.Files.Patterns.Positive {
 
 		if *verbose {
-			log.Printf("Collecting files from: %s.", p)
+			log.Printf("Collecting files from: %s", p)
 		}
 
 		// Expand the pattern to a list of matching file paths
@@ -481,7 +483,7 @@ func getFilePaths(conf structs.FileShot, verbose *bool, hashes []string, sortMet
 
 				if result {
 					if *verbose {
-						log.Printf("[IGNORING] Negative pattern matched: %s %s.", negativePattern, filePath)
+						log.Printf("[IGNORING] Negative pattern matched: %s %s", negativePattern, filePath)
 					}
 					continue OUTERMATCH
 				}
@@ -526,14 +528,19 @@ func getFilePaths(conf structs.FileShot, verbose *bool, hashes []string, sortMet
 		var checkType bool
 
 		// If total files collected exceeds amount allowed per collection, finish.
-		if conf.Files.LimitTotal > 0 && totalCount > conf.Files.LimitTotal {
+		if conf.Files.LimitTotal > 0 && totalCount >= conf.Files.LimitTotal {
 			log.Printf("[LIMIT REACHED] Total file collection limit of %d reached.", conf.Files.LimitTotal)
-			continue
+			break
 		}
 
 		// If current path exceeds amount allowed per collection path, move onto next path.
-		if conf.Files.LimitPattern > 0 && patternCount[f.pattern] > conf.Files.LimitPattern {
-			log.Printf("[LIMIT REACHED] Total pattern collection limit of %d reached for %s.", conf.Files.LimitPattern, f.pattern)
+		// log.Println(f.pattern, patternCount[f.pattern])
+		if conf.Files.LimitPattern > 0 && patternCount[f.pattern] >= conf.Files.LimitPattern {
+			// Only show the pattern limit warning once per pattern
+			if !patternLimitReached {
+				log.Printf("[LIMIT REACHED] Total pattern collection limit of %d reached for %s.", conf.Files.LimitPattern, f.pattern)
+				patternLimitReached = true
+			}
 			continue
 		}
 
@@ -557,15 +564,20 @@ func getFilePaths(conf structs.FileShot, verbose *bool, hashes []string, sortMet
 		if !(conf.Files.Minsize < 0) && conf.Files.Maxsize > 0 {
 			if !checkSize {
 				if *verbose {
-					log.Printf("[IGNORING] File size (%d) is not within configured Minsize (%d) and Maxsize (%d): %s.", fileSize, int64(conf.Files.Minsize), int64(conf.Files.Maxsize), f.filePath)
+					log.Printf("[IGNORING] File size (%d) is not within configured Minsize (%d) and Maxsize (%d): %s", fileSize, int64(conf.Files.Minsize), int64(conf.Files.Maxsize), f.filePath)
 				}
 				continue
 			}
 		}
 
-		// If current path exceeds amount of bandwidth allowed, move onto next path.
-		if conf.Files.LimitBandwidth > 0 && (bandwidthCount+f.fileSize) > conf.Files.LimitBandwidth {
-			log.Printf("[LIMIT REACHED] File would exceed total bandwidth limit of %d reached on %s.", conf.Files.LimitBandwidth, f.filePath)
+		// If current path exceeds amount of capacity allowed, move onto next path.
+		if conf.Files.LimitCapacity > 0 && (capacityCount+f.fileSize) > conf.Files.LimitCapacity {
+			if !capacityLimitReached {
+				capacityLimitReached = true
+			}
+			if *verbose {
+				log.Printf("[LIMIT REACHED] File would exceed total capacity limit of %d on %s", conf.Files.LimitCapacity, f.filePath)
+			}
 			continue
 		}
 
@@ -605,13 +617,19 @@ func getFilePaths(conf structs.FileShot, verbose *bool, hashes []string, sortMet
 
 		// Iterate Limiter Counts
 		totalCount += 1
-		patternCount[f.pattern] =+ 1
-		bandwidthCount += fileSize
+		patternCount[f.pattern] += 1
+		capacityCount += fileSize
 
 		paths = append(paths, f.filePath)
 
 		log.Printf("File staged for submission: %s %d %s %s %s", f.filePath, fileSize, fileType, fileHash, modTime)
 	}
+
+	if capacityLimitReached {
+		log.Printf("[LIMIT REACHED] File collection was limited by total capacity limit of %d. Use verbose logging mode to learn more.", conf.Files.LimitCapacity)
+	}
+
+	log.Printf("Collected %d total files.", totalCount)
 
 	return paths
 }
