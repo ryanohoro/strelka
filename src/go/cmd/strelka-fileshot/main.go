@@ -280,6 +280,10 @@ func checkFileSize(fileSize int64, minSize int64, maxSize int64, verbose bool) (
 // Checks the MIME type of a file against a list of MIME types and returns
 // true if a match is found, or false otherwise.
 func checkFileMimetype(file *os.File, positivemimetypes []string, negativemimetypes []string, verbose bool) (bool, string) {
+	
+	// Make sure the file pointer is at 0
+	file.Seek(0, 0)
+	
 	// Read the first 512 bytes of the file
 	buffer := make([]byte, 512)
 	_, err := file.Read(buffer)
@@ -338,6 +342,10 @@ func checkFileMimetype(file *os.File, positivemimetypes []string, negativemimety
 // checkFileHash checks the hash of a file against a list of hashes and returns
 // true if a match is found, or false otherwise.
 func checkFileHash(file *os.File, hashlist []string, verbose bool) (bool, string) {
+
+	// Make sure the file pointer is at 0
+	file.Seek(0, 0)
+
 	// Create a new MD5 hash
 	hash := md5.New()
 
