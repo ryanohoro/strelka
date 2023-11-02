@@ -360,7 +360,7 @@ func checkFileHash(file *os.File, hashlist []string, verbose bool) (bool, string
 	for _, s := range hashlist {
 		if s == fmt.Sprintf("%x", hash.Sum(nil)) {
 			if verbose {
-				log.Printf("[IGNORING] File hash (%s) was found in hash exclusion list: %s.", fmt.Sprintf("%x", hash.Sum(nil)), file.Name())
+				log.Printf("[IGNORING] File hash (%s) was found in hash exclusion list.", fmt.Sprintf("%x", hash.Sum(nil)))
 			}
 			return false, fmt.Sprintf("%x", hash.Sum(nil))
 		}
