@@ -11,10 +11,10 @@ throughput:
   delay: 1s
 log:
   verbose: False
-  path: 'C:\temp\fileshot.log'
+  path: '/tmp/fileshot.log'
   maxsize: 1      # Log file size limit in Megabytes
-	maxbackups: 0   # Log file backup count limit
-	maxage: 7       # Log file age limit in days
+  maxbackups: 0   # Log file backup count limit
+  maxage: 7       # Log file age limit in days
 files:
   sort:
     time: desc
