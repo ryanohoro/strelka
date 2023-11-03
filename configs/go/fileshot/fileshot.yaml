@@ -26,8 +26,9 @@ files:
     positive:
       - '/glob/to/your/files/*'
       - '/superglob/to/your/files/**'
-    # negative  # Does not support doublestar **
+    # negative
     #   - '/*/badfiles/*'
+    #   - '/**/temp-*.log'
   minsize: 1                  # Limit minimum file size in bytes
   maxsize: 999999999          # Limit max file size in bytes
   limitcapacity: 999999999    # Limit max file bandwidth in bytes

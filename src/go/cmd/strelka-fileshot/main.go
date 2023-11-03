@@ -398,19 +398,13 @@ func checkRecentlyModified(modTime time.Time, modified int, verbose bool) (bool,
 
 // wildCardToRegexp converts a wildcard pattern to a regular expression pattern.
 func wildCardToRegexp(pattern string) string {
-	var result strings.Builder
-	for i, literal := range strings.Split(pattern, "*") {
 
-		// Replace * with .*
-		if i > 0 {
-			result.WriteString(".*")
-		}
+	result := regexp.QuoteMeta(pattern)
+	result = strings.Replace(result, "\\*\\*", ".*", -1)
+	result = strings.Replace(result, "\\*", "[^\\\\]*", -1)
 
-		// Quote any regular expression meta characters in the
-		// literal text.
-		result.WriteString(regexp.QuoteMeta(literal))
-	}
-	return result.String()
+	return result
+
 }
 
 func sortMatches(matches []matchRich, field string, order string) []matchRich {
@@ -503,7 +497,9 @@ func getFilePaths(conf structs.FileShot, verbose *bool, hashes []string) []strin
 			}
 
 			for _, negativePattern := range conf.Files.Patterns.Negative {
-				result, _ := regexp.MatchString(wildCardToRegexp(negativePattern), filePath)
+				re, _ := regexp.Compile("^" + wildCardToRegexp(negativePattern) + "$")
+
+				result := re.Match(([]byte)(filePath))
 
 				if result {
 					if *verbose {
