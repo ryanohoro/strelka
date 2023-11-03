@@ -1,3 +1,5 @@
+version:
+  2023-10-03
 client: 'go-fileshot-default'
 conn:
   server: 'localhost:57314'

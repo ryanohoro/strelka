@@ -37,8 +37,8 @@ type matchRich struct {
 
 func main() {
 	// Declare flags
-	confPath := flag.String("c", "/etc/strelka/fileshot.yaml", "Path to fileshot configuration file.")
-	hashPath := flag.String("e", "", "Path to MD5 exclusions list.")
+	configPath := flag.String("c", "/etc/strelka/fileshot.yaml", "Path to fileshot configuration file.")
+	hashPath := flag.String("e", "", "Path to hash exclusions list.")
 	verbose := flag.Bool("v", false, "Enables additional error logging.")
 	cpuProf := flag.Bool("cpu", false, "Enables cpu profiling.")
 	heapProf := flag.Bool("heap", false, "Enables heap profiling.")
@@ -61,10 +61,20 @@ func main() {
 	}
 
 	// Read configuration file
-	confData, err := os.ReadFile(*confPath)
+	confData, err := os.ReadFile(*configPath)
 	if err != nil {
-		log.Fatalf("failed to read config file %s: %v", *confPath, err)
+		log.Fatalf("failed to read config file %s: %v", *configPath, err)
 	}
+
+	// Try to recover absolute config file path
+	absConfigPath, _ := filepath.Abs(*configPath)
+	if absConfigPath == "" {
+		absConfigPath = *configPath
+	}
+
+	// Create a new config hash
+	configHasher := md5.New()
+	configHasher.Write([]byte(confData))
 
 	// Unmarshal configuration data into struct
 	var conf structs.FileShot
@@ -103,6 +113,12 @@ func main() {
 
 		log.SetOutput(mw)
 
+	}
+
+	if conf.Version != "" {
+		log.Printf("Loaded config file v%s %s %s", conf.Version, fmt.Sprintf("%x", configHasher.Sum(nil)), absConfigPath)
+	} else {
+		log.Printf("Loaded config file %s %s", fmt.Sprintf("%x", configHasher.Sum(nil)), absConfigPath)
 	}
 
 	// Create a slice to hold the lines of the file

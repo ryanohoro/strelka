@@ -96,6 +96,7 @@ type ConfResponse struct {
 
 // defines structures of configuration files
 type FileShot struct {
+	Version    string         // optional
 	Client     string         // optional
 	Conn       ConfConn       // required
 	Throughput ConfThroughput // required
