@@ -22,8 +22,8 @@ import (
 	"github.com/target/strelka/src/go/pkg/rpc"
 	"github.com/target/strelka/src/go/pkg/structs"
 
+	"github.com/bmatcuk/doublestar/v4"
 	"github.com/gabriel-vasile/mimetype"
-
 	"google.golang.org/grpc"
 	"gopkg.in/yaml.v2"
 )
@@ -478,7 +478,7 @@ func getFilePaths(conf structs.FileShot, verbose *bool, hashes []string) []strin
 		}
 
 		// Expand the pattern to a list of matching file paths
-		match, err := filepath.Glob(p)
+		match, err := doublestar.FilepathGlob(p)
 		if err != nil {
 			log.Printf("failed to glob pattern %s: %v", p, err)
 			continue

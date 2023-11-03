@@ -25,7 +25,8 @@ files:
   patterns:
     positive:
       - '/glob/to/your/files/*'
-    # negative
+      - '/superglob/to/your/files/**'
+    # negative  # Does not support doublestar **
     #   - '/*/badfiles/*'
   minsize: 1                  # Limit minimum file size in bytes
   maxsize: 999999999          # Limit max file size in bytes
