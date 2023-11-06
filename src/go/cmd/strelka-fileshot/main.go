@@ -286,8 +286,6 @@ func main() {
 		responses <- nil
 		wgResponse.Wait()
 
-
-
 	}
 
 	// Check if the heapProf flag is set and write a heap profile if it is.
@@ -677,7 +675,7 @@ func getFilePaths(conf structs.FileShot, verbose *bool, hashes []string) []match
 		log.Printf("[LIMIT REACHED] File collection was limited by total capacity limit of %d. Use verbose logging mode to learn more.", conf.Files.LimitCapacity)
 	}
 
-	log.Printf("Collected %d total files.", totalCount)
+	log.Printf("Collected %d total files.", len(stageRichFiles))
 
 	return stageRichFiles
 }
