@@ -19,10 +19,11 @@ import (
 )
 
 // Formats rpc errors into easily read messages
-func errToMsg(err error) string {
+func errToMsg(err error, msg string) string {
 	st, _ := status.FromError(err)
 	return fmt.Sprintf(
-		"rpc err:\n\t\t\t code: %v: \n\t\t\t message: %v",
+		"rpc err:\n\t\t\t on: %s \n\t\t\t code: %v: \n\t\t\t message: %v",
+		msg,
 		st.Code(),
 		st.Message(),
 	)
@@ -128,7 +129,7 @@ func DiscardResponses(responses <-chan *strelka.ScanResponse) {
 	}
 }
 
-func ScanFile(client strelka.FrontendClient, timeout time.Duration, req structs.ScanFileRequest, responses chan<- *strelka.ScanResponse) {
+func ScanFile(client strelka.FrontendClient, timeout time.Duration, req structs.ScanFileRequest, responses chan<- *strelka.ScanResponse) bool {
 
 	deadline := time.Now().Add(timeout)
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
@@ -138,7 +139,7 @@ func ScanFile(client strelka.FrontendClient, timeout time.Duration, req structs.
 	file, err := os.Open(req.Attributes.Filename)
 	if err != nil {
 		log.Printf("failed to open file %s: %v", req.Attributes.Filename, err)
-		return
+		return false
 	}
 
 	// If specified, delete or move file to processed directory
@@ -158,8 +159,8 @@ func ScanFile(client strelka.FrontendClient, timeout time.Duration, req structs.
 
 	scanFile, err := client.ScanFile(ctx, grpc.WaitForReady(true))
 	if err != nil {
-		log.Println(errToMsg(err))
-		return
+		log.Println(errToMsg(err, "ScanFile() " + req.Attributes.Filename))
+		return false
 	}
 
 	// Send file to the frontend in chunks
@@ -169,7 +170,7 @@ func ScanFile(client strelka.FrontendClient, timeout time.Duration, req structs.
 		if err != nil {
 			if err != io.EOF {
 				log.Printf("failed to read file %s: %v", req.Attributes.Filename, err)
-				return
+				return false
 			}
 
 			break
@@ -189,7 +190,7 @@ func ScanFile(client strelka.FrontendClient, timeout time.Duration, req structs.
 
 	if err := scanFile.CloseSend(); err != nil {
 		log.Printf("failed to close stream: %v", err)
-		return
+		return false
 	}
 
 	// Wait for the response from the frontend containing the event
@@ -199,11 +200,13 @@ func ScanFile(client strelka.FrontendClient, timeout time.Duration, req structs.
 			break
 		}
 		if err != nil {
-			log.Println(errToMsg(err))
-			break
+			log.Println(errToMsg(err, "Recv() " + req.Attributes.Filename))
+			return false
 		}
 
 		// Add the event to the responses channel
 		responses <- resp
 	}
+
+	return true
 }

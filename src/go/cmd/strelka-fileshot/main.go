@@ -72,10 +72,6 @@ func main() {
 		absConfigPath = *configPath
 	}
 
-	// Create a new config hash
-	configHasher := md5.New()
-	configHasher.Write([]byte(confData))
-
 	// Unmarshal configuration data into struct
 	var conf structs.FileShot
 	err = yaml.Unmarshal(confData, &conf)
@@ -115,11 +111,22 @@ func main() {
 
 	}
 
-	if conf.Version != "" {
-		log.Printf("Loaded config file v%s %s %s", conf.Version, fmt.Sprintf("%x", configHasher.Sum(nil)), absConfigPath)
-	} else {
-		log.Printf("Loaded config file %s %s", fmt.Sprintf("%x", configHasher.Sum(nil)), absConfigPath)
+	var clientVersion string
+	var configVersion string
+	var configHash string
+
+	// Create a new config hash
+	configHasher := md5.New()
+	_, err = configHasher.Write([]byte(confData))
+	if err == nil {
+		configHash = fmt.Sprintf("%x", configHasher.Sum(nil))
 	}
+	
+	if conf.Version != "" {
+		configVersion = conf.Version
+	}
+
+	log.Printf("Loaded config file %s %s %s", configVersion, configHash, absConfigPath)
 
 	// Create a slice to hold the lines of the file
 	hashes := make([]string, 0)
@@ -229,12 +236,21 @@ func main() {
 			Gatekeeper: conf.Files.Gatekeeper,
 		}
 
-		for _, path := range getFilePaths(conf, verbose, hashes) {
+		for _, richFile := range getFilePaths(conf, verbose, hashes) {
+
+			metadata := make(map[string]string)
+
+			metadata["file_modified"] = richFile.modTime.UTC().Format("2006-01-02T15:04:05.999Z")
+			metadata["client_version"] = clientVersion
+			metadata["config_version"] = configVersion
+			metadata["config_hash"] = configHash
+
 			// Create the ScanFileRequest struct with the provided attributes.
 			req := structs.ScanFileRequest{
 				Request: request,
 				Attributes: &strelka.Attributes{
-					Filename: path,
+					Filename: richFile.filePath,
+					Metadata: metadata,
 				},
 				Chunk:  conf.Throughput.Chunk,
 				Delay:  conf.Throughput.Delay,
@@ -245,7 +261,7 @@ func main() {
 			sem <- 1
 			wgRequest.Add(1)
 			go func() {
-				rpc.ScanFile(
+				scanStatus := rpc.ScanFile(
 					frontend,
 					conf.Conn.Timeout.File,
 					req,
@@ -255,6 +271,12 @@ func main() {
 				// Notify the wgRequest wait group that the goroutine has finished.
 				wgRequest.Done()
 
+				if scanStatus {
+					log.Printf("Successfully submitted file: %s", req.Attributes.Filename)
+				} else {
+					log.Printf("Failed to submit file: %s", req.Attributes.Filename)
+				}
+
 				// Release the semaphore to indicate that the goroutine has finished.
 				<-sem
 			}()
@@ -263,6 +285,8 @@ func main() {
 		wgRequest.Wait()
 		responses <- nil
 		wgResponse.Wait()
+
+
 
 	}
 
@@ -445,10 +469,10 @@ func sortMatches(matches []matchRich, field string, order string) []matchRich {
 
 }
 
-func getFilePaths(conf structs.FileShot, verbose *bool, hashes []string) []string {
+func getFilePaths(conf structs.FileShot, verbose *bool, hashes []string) []matchRich {
 
-	paths := make([]string, 0)
 	var matchRichFiles []matchRich
+	var stageRichFiles []matchRich
 	patternLimitReached := false
 	capacityLimitReached := false
 
@@ -644,7 +668,7 @@ func getFilePaths(conf structs.FileShot, verbose *bool, hashes []string) []strin
 		patternCount[f.pattern] += 1
 		capacityCount += fileSize
 
-		paths = append(paths, f.filePath)
+		stageRichFiles = append(stageRichFiles, f)
 
 		log.Printf("File staged for submission: %s %d %s %s %s", f.filePath, fileSize, fileType, fileHash, modTime)
 	}
@@ -655,5 +679,5 @@ func getFilePaths(conf structs.FileShot, verbose *bool, hashes []string) []strin
 
 	log.Printf("Collected %d total files.", totalCount)
 
-	return paths
+	return stageRichFiles
 }

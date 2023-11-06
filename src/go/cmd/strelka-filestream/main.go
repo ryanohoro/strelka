@@ -165,7 +165,8 @@ func main() {
 			// Add request to asyncronous wait group
 			wgRequest.Add(1)
 			go func() {
-				rpc.ScanFile(
+				// TODO: Log based on success of request
+				_ = rpc.ScanFile(
 					frontend,
 					conf.Conn.Timeout.File,
 					req,
@@ -233,7 +234,8 @@ func main() {
 				// Add request to asyncronous wait group
 				wgRequest.Add(1)
 				go func() {
-					rpc.ScanFile(
+					// TODO: Log based on success of request
+					_ = rpc.ScanFile(
 						frontend,
 						conf.Conn.Timeout.File,
 						req,

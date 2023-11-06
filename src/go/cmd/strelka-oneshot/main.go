@@ -97,7 +97,8 @@ func main() {
 	}
 
 	// Send request to frontend
-	rpc.ScanFile(frontend, time.Second*time.Duration(*scanTimeout), req, responses)
+	// TODO: Log based on success of request
+	_ = rpc.ScanFile(frontend, time.Second*time.Duration(*scanTimeout), req, responses)
 
 	// Wait for request to complete
 	responses <- nil
