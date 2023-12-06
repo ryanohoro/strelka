@@ -1,4 +1,5 @@
 import glob
+import logging
 import os
 
 import yara
@@ -40,6 +41,10 @@ class ScanYara(strelka.Scanner):
         self.loaded_configs = False
         self.rules_loaded = 0
 
+        self.warn_user = False
+        self.warned_user = False
+        self.warn_message = ""
+
     def scan(self, data, file, options, expire_at):
         """Scans the provided data with YARA rules.
 
@@ -58,7 +63,6 @@ class ScanYara(strelka.Scanner):
             self.load_yara_rules(options)
             if not self.compiled_yara:
                 self.flags.append("no_rules_loaded")
-                return
 
         # Set the total rules loaded
         self.event["rules_loaded"] = self.rules_loaded
@@ -79,35 +83,36 @@ class ScanYara(strelka.Scanner):
         self.event["hex"] = []
 
         # Match the data against the YARA rules.
-        yara_matches = self.compiled_yara.match(data=data)
-        for match in yara_matches:
-            # Append rule matches and update tags.
-            self.event["matches"].append(match.rule)
-            self.event["tags"].extend(match.tags)
+        if self.compiled_yara:
+            yara_matches = self.compiled_yara.match(data=data)
+            for match in yara_matches:
+                # Append rule matches and update tags.
+                self.event["matches"].append(match.rule)
+                self.event["tags"].extend(match.tags)
 
-            # Extract hex representation if configured to store offsets.
-            if self.store_offset and self.offset_meta_key:
-                if match.meta.get(self.offset_meta_key):
-                    for string_data in match.strings:
-                        for instance in string_data.instances:
-                            offset = instance.offset
-                            matched_string = instance.matched_data
-                            self.extract_match_hex(
-                                match.rule,
-                                offset,
-                                matched_string,
-                                data,
-                                self.offset_padding,
-                            )
+                # Extract hex representation if configured to store offsets.
+                if self.store_offset and self.offset_meta_key:
+                    if match.meta.get(self.offset_meta_key):
+                        for string_data in match.strings:
+                            for instance in string_data.instances:
+                                offset = instance.offset
+                                matched_string = instance.matched_data
+                                self.extract_match_hex(
+                                    match.rule,
+                                    offset,
+                                    matched_string,
+                                    data,
+                                    self.offset_padding,
+                                )
 
-            # Append meta information if configured to do so.
-            for k, v in match.meta.items():
-                self.event["meta"].append(
-                    {"rule": match.rule, "identifier": k, "value": v}
-                )
+                # Append meta information if configured to do so.
+                for k, v in match.meta.items():
+                    self.event["meta"].append(
+                        {"rule": match.rule, "identifier": k, "value": v}
+                    )
 
-        # De-duplicate tags.
-        self.event["tags"] = list(set(self.event["tags"]))
+            # De-duplicate tags.
+            self.event["tags"] = list(set(self.event["tags"]))
 
     def load_yara_rules(self, options):
         """Loads YARA rules based on the provided path.
@@ -123,7 +128,7 @@ class ScanYara(strelka.Scanner):
         """
         # Retrieve location of YARA rules.
         location = options.get("location", "/etc/strelka/yara/")
-        compiled = options.get("compiled")
+        compiled = options.get("compiled", {"enabled": False})
 
         try:
             # Load compiled YARA rules from a file.
@@ -133,6 +138,7 @@ class ScanYara(strelka.Scanner):
                 )
         except yara.Error as e:
             self.flags.append(f"compiled_load_error_{e}")
+            self.warn_user = True
 
         try:
             # Compile YARA rules from a directory.
@@ -153,13 +159,39 @@ class ScanYara(strelka.Scanner):
                     self.compiled_yara = yara.compile(filepath=location)
                 else:
                     self.flags.append("yara_location_not_found")
-        except yara.Error as e:
-            self.flags.append(f"compiling_error_general_{e}")
+                    self.warn_user = True
+                    self.warn_message = "YARA Location Not Found"
+
         except yara.SyntaxError as e:
             self.flags.append(f"compiling_error_syntax_{e}")
+            self.warn_user = True
+            self.warn_message = str(e)
+
+        except yara.Error as e:
+            self.flags.append(f"compiling_error_general_{e}")
+            self.warn_user = True
+            self.warn_message = str(e)
 
         # Set the total rules loaded.
-        self.rules_loaded = len(list(self.compiled_yara))
+        if self.compiled_yara:
+            self.rules_loaded = len(list(self.compiled_yara))
+
+        if not self.compiled_yara:
+            if not self.warned_user and self.warn_user:
+                logging.warning(
+                    "\n"
+                    "*************************************************\n"
+                    "* WARNING: YARA File Loading Issue Detected     *\n"
+                    "*************************************************\n"
+                    "There was an issue loading the compiled YARA file. Please check that all YARA rules can be\n"
+                    "successfully compiled. Additionally, verify the 'ScanYara' configuration in Backend.yaml to\n"
+                    "ensure the targeted path is correct. This issue needs to be resolved for proper scanning\n"
+                    "functionality.\n"
+                    "\n"
+                    f"Error: {self.warn_message}\n"
+                    "*************************************************\n"
+                )
+                self.warned_user = True
 
     def extract_match_hex(self, rule, offset, matched_string, data, offset_padding=32):
         """
