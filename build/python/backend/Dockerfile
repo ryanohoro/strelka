@@ -1,5 +1,3 @@
-LABEL maintainer="Target Brands, Inc. TTS-CFC-OpenSource@target.com"
-
 # Build stage
 FROM ubuntu:22.04 AS builder
 ARG DEBIAN_FRONTEND=noninteractive
@@ -158,6 +156,8 @@ ENV PATH=$PATH:/opt/zeek/bin
 ARG USERNAME=strelka
 ARG USER_UID=1001
 ARG USER_GID=$USER_UID
+ARG CONFIG_TESTS=false
+ARG SCANNER_TEST=""
 
 # Create user
 RUN groupadd --gid $USER_GID $USERNAME && \
@@ -205,6 +205,9 @@ COPY --from=builder /jtr/ /jtr/
 COPY --from=builder /etc/strelka/ /etc/strelka/
 COPY --from=builder /etc/suricata/suricata.yaml /etc/suricata/suricata.yaml
 
+# Copy application source for tests
+COPY --from=builder /strelka/ /strelka/
+
 # Copy Python packages and executables
 COPY --from=builder /usr/local/lib/python3.10/ /usr/local/lib/python3.10/
 COPY --from=builder /usr/lib/python3/dist-packages/ /usr/lib/python3/dist-packages/
@@ -221,3 +224,17 @@ RUN mkdir -p /var/log/strelka/ && \
 VOLUME ["/etc/strelka", "/var/log/strelka"]
 
 USER $USERNAME
+
+RUN echo '[+] Run build checks' && \
+    cd /strelka/strelka/ && \
+    if [ "$SCANNER_TEST" != "" ]; then python3 -m pytest -p no:cacheprovider -s tests/$SCANNER_TEST; fi && \
+    if $CONFIG_TESTS; then python3 -m pytest -s tests_configuration/; fi && \
+    echo '[+] Done'
+
+# Remove source directory, needed only for tests
+USER root
+RUN rm -rf /strelka/
+
+USER $USERNAME
+
+LABEL maintainer="Target Brands, Inc. TTS-CFC-OpenSource@target.com"
