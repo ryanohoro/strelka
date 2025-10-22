@@ -97,11 +97,11 @@ services:
       - postgresdb
 
   postgresdb:
-    image: docker.io/bitnami/postgresql:11
+    image: docker.io/postgres:15.14
     restart: unless-stopped
     environment:
-      - POSTGRESQL_DATABASE=strelka_ui
-      - POSTGRESQL_PASSWORD=postgres
-      - POSTGRESQL_USERNAME=postgres
+      - POSTGRE_DB=strelka_ui
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_USERNAME=postgres
     networks:
       - net
